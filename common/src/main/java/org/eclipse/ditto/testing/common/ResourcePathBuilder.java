@@ -221,6 +221,12 @@ public final class ResourcePathBuilder {
             return this;
         }
 
+        public Policy policyEntryReferences(final CharSequence label) {
+            policyEntry(label);
+            stringBuilder.append(SLASH).append("references");
+            return this;
+        }
+
         public Policy policyImports() {
             stringBuilder.append(SLASH).append("imports");
             return this;

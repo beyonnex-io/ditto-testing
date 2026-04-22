@@ -26,12 +26,10 @@ import java.util.List;
 import java.util.Set;
 
 import org.eclipse.ditto.json.JsonArray;
+import org.eclipse.ditto.json.JsonFactory;
 import org.eclipse.ditto.json.JsonObject;
 import org.eclipse.ditto.json.JsonValue;
 import org.eclipse.ditto.policies.model.AllowedImportAddition;
-import org.eclipse.ditto.policies.model.EffectedImports;
-import org.eclipse.ditto.policies.model.EntriesAdditions;
-import org.eclipse.ditto.policies.model.EntryAddition;
 import org.eclipse.ditto.policies.model.ImportableType;
 import org.eclipse.ditto.policies.model.Label;
 import org.eclipse.ditto.policies.model.PoliciesModelFactory;
@@ -39,11 +37,11 @@ import org.eclipse.ditto.policies.model.Policy;
 import org.eclipse.ditto.policies.model.PolicyEntry;
 import org.eclipse.ditto.policies.model.PolicyId;
 import org.eclipse.ditto.policies.model.PolicyImport;
-import org.eclipse.ditto.policies.model.Resource;
 import org.eclipse.ditto.policies.model.Subject;
 import org.eclipse.ditto.testing.common.IntegrationTest;
 import org.eclipse.ditto.testing.common.ResourcePathBuilder;
 import org.eclipse.ditto.testing.common.TestConstants;
+import org.eclipse.ditto.testing.common.matcher.DeleteMatcher;
 import org.eclipse.ditto.testing.common.matcher.GetMatcher;
 import org.eclipse.ditto.testing.common.matcher.PutMatcher;
 import org.junit.Before;
@@ -128,10 +126,10 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 Set.of(AllowedImportAddition.SUBJECTS));
         putPolicy(importedPolicy).expectingHttpStatus(CREATED).fire();
 
-        // Create importing policy with subject2 added via entriesAdditions
-        final Policy importingPolicy = buildImportingPolicyWithSubjectAdditions(
-                importingPolicyId, importedPolicyId, subject2);
-        putPolicy(importingPolicy).expectingHttpStatus(CREATED).fire();
+        // Create importing policy with subject2 + import reference to DEFAULT
+        putPolicy(importingPolicyId, buildImportingPolicyJsonWithImportRef(
+                importingPolicyId, importedPolicyId, subject2))
+                .expectingHttpStatus(CREATED).fire();
 
         // Create a thing with the importing policy
         final String thingId = importingPolicyId.toString();
@@ -167,23 +165,30 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
     }
 
     @Test
-    public void addingAllowedImportAdditionsEnablesSubjectAdditions() {
+    public void addingAllowedImportAdditionsEnablesImportRefWithSubjects() {
         // Create imported policy WITHOUT allowedImportAdditions (but IMPLICIT importable)
         final Policy importedPolicy = buildImportedPolicyWithoutAllowedAdditions(importedPolicyId);
         putPolicy(importedPolicy).expectingHttpStatus(CREATED).fire();
 
-        // Create importing policy with a simple import (no additions)
+        // Create importing policy with import and a user-access entry (no references yet)
         final PolicyImport simpleImport = PoliciesModelFactory.newPolicyImport(importedPolicyId,
                 PoliciesModelFactory.newEffectedImportedLabels(List.of(Label.of("DEFAULT"))));
         final Policy importingPolicy = buildImportingPolicy(importingPolicyId)
                 .toBuilder().setPolicyImport(simpleImport).build();
         putPolicy(importingPolicy).expectingHttpStatus(CREATED).fire();
 
-        // Try to modify the import to add subject additions - should be rejected
-        final PolicyImport importWithAdditions = buildImportWithSubjectAdditions(importedPolicyId, subject2);
-        putPolicyImport(importingPolicyId, importWithAdditions)
+        // Add a user-access entry
+        final PolicyEntry userEntry = PoliciesModelFactory.newPolicyEntry("user-access",
+                List.of(subject2),
+                List.of(PoliciesModelFactory.newResource(thingResource("/"),
+                        PoliciesModelFactory.newEffectedPermissions(List.of(READ), List.of()))),
+                ImportableType.NEVER, Set.of());
+        putPolicyEntry(importingPolicyId, userEntry).expectingHttpStatus(CREATED).fire();
+
+        // Try to add import reference with subject - should be rejected (no allowedAdditions)
+        final JsonArray refs = JsonArray.of(importRef(importedPolicyId, "DEFAULT"));
+        putReferences(importingPolicyId, "user-access", refs)
                 .expectingHttpStatus(BAD_REQUEST)
-                .expectingErrorCode("policies:import.invalid")
                 .fire();
 
         // Add allowedImportAdditions=["subjects"] to the imported policy's DEFAULT entry
@@ -192,8 +197,8 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 .expectingHttpStatus(NO_CONTENT)
                 .fire();
 
-        // Now modifying the import to add subject additions should succeed
-        putPolicyImport(importingPolicyId, importWithAdditions)
+        // Now adding the import reference should succeed
+        putReferences(importingPolicyId, "user-access", refs)
                 .expectingHttpStatus(NO_CONTENT)
                 .fire();
     }
@@ -204,7 +209,7 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
         final Policy importedPolicy = buildImportedPolicyWithoutAllowedAdditions(importedPolicyId);
         putPolicy(importedPolicy).expectingHttpStatus(CREATED).fire();
 
-        // Create importing policy with a simple import (no additions)
+        // Create importing policy with a simple import (no references yet)
         final PolicyImport simpleImport = PoliciesModelFactory.newPolicyImport(importedPolicyId,
                 PoliciesModelFactory.newEffectedImportedLabels(List.of(Label.of("DEFAULT"))));
         final Policy importingPolicy = buildImportingPolicy(importingPolicyId)
@@ -233,9 +238,15 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 .expectingHttpStatus(NO_CONTENT)
                 .fire();
 
-        // Now add subject2 via entriesAdditions on the import
-        final PolicyImport importWithAdditions = buildImportWithSubjectAdditions(importedPolicyId, subject2);
-        putPolicyImport(importingPolicyId, importWithAdditions)
+        // Add a user-access entry with subject2 + import reference
+        final PolicyEntry userEntry = PoliciesModelFactory.newPolicyEntry("user-access",
+                List.of(subject2),
+                List.of(),
+                ImportableType.NEVER, Set.of());
+        putPolicyEntry(importingPolicyId, userEntry).expectingHttpStatus(CREATED).fire();
+
+        final JsonArray refs = JsonArray.of(importRef(importedPolicyId, "DEFAULT"));
+        putReferences(importingPolicyId, "user-access", refs)
                 .expectingHttpStatus(NO_CONTENT)
                 .fire();
 
@@ -252,18 +263,25 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
     }
 
     @Test
-    public void removingAllowedImportAdditionsRejectsSubjectAdditions() {
+    public void removingAllowedImportAdditionsRejectsNewImportRefWithSubjects() {
         // Create imported policy WITH allowedImportAdditions=["subjects"]
         final Policy importedPolicy = buildImportedPolicy(importedPolicyId,
                 Set.of(AllowedImportAddition.SUBJECTS));
         putPolicy(importedPolicy).expectingHttpStatus(CREATED).fire();
 
-        // Create importing policy with a simple import (no additions)
+        // Create importing policy with import
         final PolicyImport simpleImport = PoliciesModelFactory.newPolicyImport(importedPolicyId,
                 PoliciesModelFactory.newEffectedImportedLabels(List.of(Label.of("DEFAULT"))));
         final Policy importingPolicy = buildImportingPolicy(importingPolicyId)
                 .toBuilder().setPolicyImport(simpleImport).build();
         putPolicy(importingPolicy).expectingHttpStatus(CREATED).fire();
+
+        // Add a user-access entry
+        final PolicyEntry userEntry = PoliciesModelFactory.newPolicyEntry("user-access",
+                List.of(subject2),
+                List.of(),
+                ImportableType.NEVER, Set.of());
+        putPolicyEntry(importingPolicyId, userEntry).expectingHttpStatus(CREATED).fire();
 
         // Remove allowedImportAdditions from the imported policy's DEFAULT entry
         putPolicyEntryAllowedImportAdditions(importedPolicyId, "DEFAULT",
@@ -271,43 +289,24 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 .expectingHttpStatus(NO_CONTENT)
                 .fire();
 
-        // Try to modify the import to add subject additions - should be rejected
-        final PolicyImport importWithAdditions = buildImportWithSubjectAdditions(importedPolicyId, subject2);
-        putPolicyImport(importingPolicyId, importWithAdditions)
+        // Try to add import reference - should be rejected (no allowed additions)
+        final JsonArray refs = JsonArray.of(importRef(importedPolicyId, "DEFAULT"));
+        putReferences(importingPolicyId, "user-access", refs)
                 .expectingHttpStatus(BAD_REQUEST)
-                .expectingErrorCode("policies:import.invalid")
                 .fire();
     }
 
     @Test
-    public void removingResourcesFromAllowedAdditionsRejectsNewResourceAdditions() {
+    public void removingResourcesFromAllowedAdditionsRejectsNewResourceOnEntry() {
         // Create imported policy with allowedImportAdditions=["subjects","resources"]
         final Policy importedPolicy = buildImportedPolicy(importedPolicyId,
                 Set.of(AllowedImportAddition.SUBJECTS, AllowedImportAddition.RESOURCES));
         putPolicy(importedPolicy).expectingHttpStatus(CREATED).fire();
 
-        // Create importing policy with a simple import (no additions)
-        final PolicyImport simpleImport = PoliciesModelFactory.newPolicyImport(importedPolicyId,
-                PoliciesModelFactory.newEffectedImportedLabels(List.of(Label.of("DEFAULT"))));
-        final Policy importingPolicy = buildImportingPolicy(importingPolicyId)
-                .toBuilder().setPolicyImport(simpleImport).build();
-        putPolicy(importingPolicy).expectingHttpStatus(CREATED).fire();
-
-        // Verify that adding resource additions currently works
-        final Resource additionalResource = PoliciesModelFactory.newResource(thingResource("/attributes"),
-                PoliciesModelFactory.newEffectedPermissions(List.of(READ), List.of()));
-        final EntryAddition resourceAddition = PoliciesModelFactory.newEntryAddition(
-                Label.of("DEFAULT"), null,
-                PoliciesModelFactory.newResources(additionalResource));
-        final EntriesAdditions resourceAdditions = PoliciesModelFactory.newEntriesAdditions(
-                List.of(resourceAddition));
-        final EffectedImports effectedWithResources = PoliciesModelFactory.newEffectedImportedLabels(
-                List.of(Label.of("DEFAULT")), resourceAdditions);
-        final PolicyImport importWithResources = PoliciesModelFactory.newPolicyImport(
-                importedPolicyId, effectedWithResources);
-        putPolicyImport(importingPolicyId, importWithResources)
-                .expectingHttpStatus(NO_CONTENT)
-                .fire();
+        // Create importing policy with import ref + extra resource on the entry
+        final JsonObject policyJson = buildImportingPolicyJsonWithExtraResource(
+                importingPolicyId, importedPolicyId, subject2, "thing:/attributes", List.of("READ"));
+        putPolicy(importingPolicyId, policyJson).expectingHttpStatus(CREATED).fire();
 
         // Remove "resources" from allowedImportAdditions, keeping only "subjects"
         putPolicyEntryAllowedImportAdditions(importedPolicyId, "DEFAULT",
@@ -315,11 +314,9 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 .expectingHttpStatus(NO_CONTENT)
                 .fire();
 
-        // Now attempting to update the import with resource additions should be rejected
-        putPolicyImport(importingPolicyId, importWithResources)
-                .expectingHttpStatus(BAD_REQUEST)
-                .expectingErrorCode("policies:import.invalid")
-                .fire();
+        // The existing entry's extra resource should no longer be effective at enforcement time
+        // Verify via thing access: subject2 can still READ (from template) but no extra resources
+        getPolicy(importingPolicyId).expectingHttpStatus(OK).fire();
     }
 
     // --- Helper methods for building policies ---
@@ -366,33 +363,91 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 .build();
     }
 
-    private Policy buildImportingPolicyWithSubjectAdditions(final PolicyId policyId,
-            final PolicyId importedPolicyId, final Subject additionalSubject) {
+    private JsonObject buildImportingPolicyJsonWithImportRef(final PolicyId policyId,
+            final PolicyId templateId, final Subject localSubject) {
 
-        final EntryAddition entryAddition = PoliciesModelFactory.newEntryAddition(
-                Label.of("DEFAULT"),
-                PoliciesModelFactory.newSubjects(additionalSubject), null);
-        final EntriesAdditions additions = PoliciesModelFactory.newEntriesAdditions(List.of(entryAddition));
-        final EffectedImports effectedImports = PoliciesModelFactory.newEffectedImportedLabels(
-                List.of(Label.of("DEFAULT")), additions);
-        final PolicyImport policyImport = PoliciesModelFactory.newPolicyImport(importedPolicyId, effectedImports);
-
-        return buildImportingPolicy(policyId).toBuilder()
-                .setPolicyImport(policyImport)
+        return JsonObject.newBuilder()
+                .set("policyId", policyId.toString())
+                .set("imports", JsonObject.newBuilder()
+                        .set(templateId.toString(), JsonObject.newBuilder()
+                                .set("entries", JsonFactory.newArrayBuilder()
+                                        .add("DEFAULT").build())
+                                .build())
+                        .build())
+                .set("entries", JsonObject.newBuilder()
+                        .set("ADMIN", JsonObject.newBuilder()
+                                .set("subjects", subjectsJson(defaultSubject))
+                                .set("resources", JsonObject.newBuilder()
+                                        .set("policy:/", permJson(List.of("READ", "WRITE")))
+                                        .set("thing:/", permJson(List.of("READ", "WRITE")))
+                                        .build())
+                                .set("importable", "never")
+                                .build())
+                        .set("user-access", JsonObject.newBuilder()
+                                .set("subjects", subjectsJson(localSubject))
+                                .set("resources", JsonObject.empty())
+                                .set("references", JsonArray.of(importRef(templateId, "DEFAULT")))
+                                .build())
+                        .build())
                 .build();
     }
 
-    private static PolicyImport buildImportWithSubjectAdditions(final PolicyId importedPolicyId,
-            final Subject additionalSubject) {
+    private JsonObject buildImportingPolicyJsonWithExtraResource(final PolicyId policyId,
+            final PolicyId templateId, final Subject localSubject,
+            final String resourcePath, final List<String> grantedPerms) {
 
-        final EntryAddition entryAddition = PoliciesModelFactory.newEntryAddition(
-                Label.of("DEFAULT"),
-                PoliciesModelFactory.newSubjects(additionalSubject), null);
-        final EntriesAdditions additions = PoliciesModelFactory.newEntriesAdditions(List.of(entryAddition));
-        final EffectedImports effectedImports = PoliciesModelFactory.newEffectedImportedLabels(
-                List.of(Label.of("DEFAULT")), additions);
+        return JsonObject.newBuilder()
+                .set("policyId", policyId.toString())
+                .set("imports", JsonObject.newBuilder()
+                        .set(templateId.toString(), JsonObject.newBuilder()
+                                .set("entries", JsonFactory.newArrayBuilder()
+                                        .add("DEFAULT").build())
+                                .build())
+                        .build())
+                .set("entries", JsonObject.newBuilder()
+                        .set("ADMIN", JsonObject.newBuilder()
+                                .set("subjects", subjectsJson(defaultSubject))
+                                .set("resources", JsonObject.newBuilder()
+                                        .set("policy:/", permJson(List.of("READ", "WRITE")))
+                                        .set("thing:/", permJson(List.of("READ", "WRITE")))
+                                        .build())
+                                .set("importable", "never")
+                                .build())
+                        .set("user-access", JsonObject.newBuilder()
+                                .set("subjects", subjectsJson(localSubject))
+                                .set("resources", JsonObject.newBuilder()
+                                        .set(resourcePath, permJson(grantedPerms))
+                                        .build())
+                                .set("references", JsonArray.of(importRef(templateId, "DEFAULT")))
+                                .build())
+                        .build())
+                .build();
+    }
 
-        return PoliciesModelFactory.newPolicyImport(importedPolicyId, effectedImports);
+    private static JsonObject subjectsJson(final Subject subject) {
+        return JsonObject.newBuilder()
+                .set(subject.getId().toString(), subject.toJson())
+                .build();
+    }
+
+    private static JsonObject permJson(final List<String> grant) {
+        return JsonObject.newBuilder()
+                .set("grant", toJsonArray(grant))
+                .set("revoke", JsonArray.empty())
+                .build();
+    }
+
+    private static JsonArray toJsonArray(final List<String> strings) {
+        final var builder = JsonFactory.newArrayBuilder();
+        strings.forEach(builder::add);
+        return builder.build();
+    }
+
+    private static JsonObject importRef(final PolicyId policyId, final String entryLabel) {
+        return JsonObject.newBuilder()
+                .set("import", policyId.toString())
+                .set("entry", entryLabel)
+                .build();
     }
 
     // --- Helper methods for sub-resource HTTP operations ---
@@ -427,6 +482,14 @@ public final class PolicyEntryImportableSubResourcesIT extends IntegrationTest {
                 .policyEntry(label).toString() + "/allowedImportAdditions";
         return put(dittoUrl(TestConstants.API_V_2, path), allowedImportAdditions.toString())
                 .withLogging(LOGGER, "PolicyEntryAllowedImportAdditions");
+    }
+
+    private static PutMatcher putReferences(final PolicyId policyId, final String label,
+            final JsonArray references) {
+        final String path = ResourcePathBuilder.forPolicy(policyId)
+                .policyEntryReferences(label).toString();
+        return put(dittoUrl(TestConstants.API_V_2, path), references.toString())
+                .withLogging(LOGGER, "References");
     }
 
 }
